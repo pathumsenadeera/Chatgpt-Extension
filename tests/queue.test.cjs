@@ -72,3 +72,22 @@ test('reload during generation pauses instead of submitting another prompt', asy
   assert.equal(s.data.queue.status,'paused'); assert.equal(s.data.queue.pending,false);
   assert.match(s.data.queue.error,/reloaded/);
 });
+test('backs up a restored first-prompt draft before allowing replacement', async () => {
+  const s = setup(); await s.start();
+  assert.equal(s.sent.find(m => m.type === 'GENERATE').replaceInitialDraft, true);
+  const draft = {type:'SAVE_DRAFT', id:'batch', index:0, text:'My unsent draft'};
+  assert.equal((await s.message(draft, {tab:{id:1}})).ok, true);
+  assert.equal(s.data.queue.draftBackups[0].text,'My unsent draft');
+  await s.message(draft, {tab:{id:1}});
+  assert.equal(s.data.queue.draftBackups.length,1);
+  await s.message({type:'DOWNLOAD_DRAFT'});
+  assert.match(s.downloads[0].filename,/previous-chat-draft.txt$/);
+  await s.result(); await s.tick();
+  assert.equal(s.sent.filter(m => m.type === 'GENERATE')[1].replaceInitialDraft, false);
+  assert.equal((await s.message({...draft,index:1}, {tab:{id:1}})).ok, false);
+});
+test('rejects draft backups from other tabs without changing stored state', async () => {
+  const s = setup(); await s.start();
+  const reply = await s.message({type:'SAVE_DRAFT',id:'batch',index:0,text:'wrong tab'}, {tab:{id:2}});
+  assert.equal(reply.ok, false); assert.equal(s.data.queue.draftBackups,undefined);
+});

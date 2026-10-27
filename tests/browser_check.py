@@ -92,4 +92,40 @@ with sync_playwright() as p:
     assert len(second['urls']) == 1
     assert first['urls'][0] != second['urls'][0]
     print('PASS: delayed composer without #prompt-textarea, actual text insertion/send, waits during streaming, finished image capture, next prompt in same chat, no previous-image duplication.')
+    # Draft-regression checks exercise real textarea/contenteditable editing.
+    for name, markup, draft, index, replace, backup_ok in [
+        ('restored textarea', '<div id="prompt-textarea">Ask ChatGPT<textarea placeholder="Message"></textarea></div>', 'An unfinished idea', 0, True, True),
+        ('restored rich editor', '<div contenteditable="true" role="textbox"><p></p></div>', 'A saved multiline idea\nwith details', 0, True, True),
+        ('decorations only', '<div contenteditable="true" role="textbox"><span contenteditable="false">Create image</span><span aria-hidden="true">Ask ChatGPT</span><p><br></p></div>', '', 0, True, True),
+        ('backup failure', '<textarea placeholder="Message"></textarea>', 'Do not lose this draft', 0, True, False),
+        ('draft during later prompt', '<textarea placeholder="Message"></textarea>', 'User typed while paused', 1, False, True),
+        ('retry same extension draft', '<textarea placeholder="Message"></textarea>', 'Create an image using the image generation tool. Generate the image rather than replying with instructions.\n\nA forest', 1, False, True),
+    ]:
+        page = browser.new_page()
+        page.route('https://chatgpt.com/**', lambda r: r.fulfill(body='<html><body><main></main></body></html>', content_type='text/html'))
+        page.goto('https://chatgpt.com/')
+        page.evaluate('''({markup,draft,backupOK}) => {
+          document.querySelector('main').innerHTML='<form>'+markup+'<button type="submit">Send</button></form>';
+          const input=document.querySelector('textarea,[contenteditable="true"]');
+          if (draft) {if (input.tagName === 'TEXTAREA') input.value=draft;else input.textContent=draft;}
+          window.results=[];window.sent=[];
+          window.chrome={runtime:{onMessage:{addListener:fn=>window.receive=fn},sendMessage:async m=>{window.results.push(m);return {ok:m.type==='SAVE_DRAFT'?backupOK:true}}}};
+          document.querySelector('form').onsubmit=e=>{e.preventDefault();window.sent.push(input.value ?? input.innerText);};
+        }''', {'markup':markup,'draft':draft,'backupOK':backup_ok})
+        page.add_script_tag(path=str(ROOT / 'content.js'))
+        response = page.evaluate('''() => new Promise(resolve=>window.receive({type:'CHECK'}, {}, resolve))''')
+        assert response['ready'] and response['instanceId'], name
+        page.evaluate('''({index,replace})=>window.receive({type:'GENERATE',id:'draft-test',index,prompt:'A forest',replaceInitialDraft:replace}, {}, ()=>{})''', {'index':index,'replace':replace})
+        success = backup_ok and (replace or not draft or name == 'retry same extension draft')
+        if success:
+            page.wait_for_function('window.sent.length === 1')
+            assert 'A forest' in page.evaluate('window.sent[0]'), name
+            if draft and index == 0:
+                assert page.evaluate("window.results.find(m=>m.type==='SAVE_DRAFT').text").strip() == draft, name
+        else:
+            page.wait_for_function("window.results.some(m=>m.type==='RESULT' && m.error)")
+            assert page.evaluate('window.sent.length') == 0, name
+            assert page.locator('textarea').input_value() == draft, name
+        print('PASS: '+name)
+        page.close()
     browser.close()

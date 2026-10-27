@@ -2,7 +2,7 @@
   let active = null;
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const instanceId = crypto.randomUUID();
-  const composer = () => [...document.querySelectorAll('#prompt-textarea, textarea[placeholder], [contenteditable="true"][role="textbox"], [contenteditable="true"].ProseMirror, [contenteditable="true"][data-lexical-editor], form [contenteditable="true"], main textarea, main [contenteditable="true"]')].find(node => visible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true');
+  const composer = () => [...document.querySelectorAll('#prompt-textarea, textarea[placeholder], [contenteditable="true"][role="textbox"], [contenteditable="true"].ProseMirror, [contenteditable="true"][data-lexical-editor], form [contenteditable="true"], main textarea, main [contenteditable="true"]')].find(node => (node instanceof HTMLTextAreaElement || node.isContentEditable) && visible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true');
   async function waitForComposer(token) {
     const deadline = Date.now() + 60000;
     while (Date.now() < deadline) {
@@ -30,13 +30,49 @@
   function images(nodes) {
     return nodes.flatMap(node => [...node.querySelectorAll('img')]).filter(img => img.complete && img.naturalWidth >= 256 && img.naturalHeight >= 256).map(img => img.currentSrc || img.src).filter(url => /^(https:|blob:|data:image\/)/.test(url));
   }
+  function draftText(input) {
+    if (input instanceof HTMLTextAreaElement) return input.value;
+    const copy = input.cloneNode(true);
+    // Tool chips and placeholder decorations are not text the user has drafted.
+    copy.querySelectorAll('[contenteditable="false"], [aria-hidden="true"], [data-placeholder]:not([contenteditable="true"])').forEach(node => node.remove());
+    copy.querySelectorAll('br').forEach(node => node.replaceWith('\n'));
+    copy.querySelectorAll('p, div, li').forEach(node => node.append('\n'));
+    return (copy.textContent || '').replace(/[\u200B-\u200D\uFEFF]/g, '').replace(/\u00a0/g, ' ');
+  }
+  function writeText(input, text) {
+    input.focus();
+    if (input instanceof HTMLTextAreaElement) {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, text);
+    } else {
+      const selection = getSelection(); const range = document.createRange();
+      range.selectNodeContents(input); selection.removeAllRanges(); selection.addRange(range);
+      const changed = text ? document.execCommand('insertText', false, text) : document.execCommand('delete', false);
+      if (!changed && draftText(input).trim()) throw Error('Unable to update the ChatGPT editor.');
+    }
+    input.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: text ? 'insertText' : 'deleteContentBackward', data: text || null}));
+  }
+  const normalized = text => text.replace(/\s+/g, ' ').trim();
+  async function prepareDraft(input, message, prompt, token) {
+    const draft = draftText(input);
+    if (!draft.trim() || normalized(draft) === normalized(prompt)) return;
+    // The batch's first tab can restore ChatGPT's shared unsent draft. Preserve
+    // it before replacing it. Never erase a draft typed between later prompts.
+    if (!message.replaceInitialDraft || message.index !== 0) throw Error('Text was entered in the batch chat. Save or clear that draft, then Resume.');
+    const saved = await chrome.runtime.sendMessage({type: 'SAVE_DRAFT', id: message.id, index: message.index, text: draft});
+    if (!saved?.ok) throw Error('Could not back up the existing chat draft. It was left unchanged.');
+    if (active !== token) return;
+    writeText(input, '');
+    if (draftText(input).trim()) throw Error('ChatGPT did not clear the saved draft. Clear the input manually and Resume.');
+  }
   async function generate(message, token) {
     let submitted = false;
     try {
       let input = await waitForComposer(token);
       if (!input || active !== token) return;
       if (busy()) throw Error('Wait for the current ChatGPT response to finish before starting.');
-      if ((input.value || input.textContent || '').trim()) throw Error('Clear your existing draft in ChatGPT before starting.');
+      const prompt = `Create an image using the image generation tool. Generate the image rather than replying with instructions.\n\n${message.prompt}`;
+      await prepareDraft(input, message, prompt, token);
+      if (active !== token) return;
       const beforeImages = new Set(images(turns()));
       const existingImages = new Set(allImages().map(img => img.currentSrc || img.src));
       const beforeCount = turns().length;
@@ -44,16 +80,10 @@
       if (active !== token) return;
       input = await waitForComposer(token);
       if (!input || active !== token) return;
-      // Explicit image instructions also work when ChatGPT does not expose an image tool menu.
-      const prompt = `Create an image using the image generation tool. Generate the image rather than replying with instructions.\n\n${message.prompt}`;
-      input.focus();
-      if (input instanceof HTMLTextAreaElement) {
-        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, prompt);
-      } else {
-        const selection = getSelection(); const range = document.createRange(); range.selectNodeContents(input); selection.removeAllRanges(); selection.addRange(range);
-        if (!document.execCommand('insertText', false, prompt)) throw Error('Unable to enter the prompt.');
-      }
-      input.dispatchEvent(new Event('input', {bubbles: true}));
+      // Tool selection can remount the editor or restore its saved value.
+      await prepareDraft(input, message, prompt, token);
+      if (active !== token) return;
+      writeText(input, prompt);
       let send;
       for (let n = 0; n < 30; n++) {
         if (active !== token) return;
@@ -104,7 +134,7 @@
     } finally { if (active === token) active = null; }
   }
   chrome.runtime.onMessage.addListener((message, sender, reply) => {
-    if (message.type === 'CHECK') { reply({ready: Boolean(composer())}); return; }
+    if (message.type === 'CHECK') { reply({ready: Boolean(composer()), instanceId}); return; }
     if (message.type === 'CANCEL') { active = null; reply({ok: true}); return; }
     if (message.type === 'GENERATE') {
       if (active) { reply({ok: false}); return; }

@@ -25,6 +25,14 @@ async function dispatch(message) {
     if (queue.pending && queue.instanceId !== message.instanceId) {
       await pauseWithError(queue, 'ChatGPT was reloaded during generation. Check the last image before resuming; Resume retries the current prompt.');
     } else if (!queue.pending && queue.phase === 'opening') await step(queue);
+  } else if (message.type === 'SAVE_DRAFT') {
+    if (!queue || queue.id !== message.id || !queue.pending || queue.index !== 0 || message.index !== 0 || typeof message.text !== 'string') throw Error('Draft backup does not match the active batch.');
+    queue.draftBackups ||= [];
+    if (!queue.draftBackups.some(backup => backup.text === message.text)) queue.draftBackups.push({text: message.text, savedAt: Date.now()});
+    await save(queue);
+  } else if (message.type === 'DOWNLOAD_DRAFT') {
+    if (!queue?.draftBackups?.length) throw Error('No saved draft available.');
+    await chrome.downloads.download({url: 'data:text/plain;charset=utf-8,' + encodeURIComponent(queue.draftBackups.map(backup => backup.text).join('\n\n--- saved draft ---\n\n')), filename: `ChatGPT-Image-Queue/${queue.id}/previous-chat-draft.txt`, conflictAction: 'uniquify', saveAs: false});
   } else if (message.type === 'RESULT') {
     if (!queue || queue.id !== message.id || !queue.pending || queue.index !== message.index || queue.status === 'stopped') return;
     queue.pending = false;
@@ -73,13 +81,13 @@ async function step(queue) {
   }
   queue.instanceId = ready.instanceId; queue.pending = true; queue.phase = 'generating'; queue.startedAt = Date.now(); await save(queue);
   try {
-    const result = await chrome.tabs.sendMessage(queue.tabId, {type: 'GENERATE', id: queue.id, index: queue.index, prompt: queue.prompts[queue.index]});
+    const result = await chrome.tabs.sendMessage(queue.tabId, {type: 'GENERATE', id: queue.id, index: queue.index, prompt: queue.prompts[queue.index], replaceInitialDraft: queue.index === 0});
     if (!result?.ok) throw Error('A previous generation is still being monitored. Wait for it to finish.');
   } catch (e) { await pauseWithError(queue, e.message || 'ChatGPT tab unavailable.'); }
 }
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   serial = serial.catch(() => {}).then(async () => {
-    if (['RESULT', 'READY'].includes(message.type) && (sender.tab?.id == null || sender.tab.id !== (await read())?.tabId)) return;
+    if (['RESULT', 'READY', 'SAVE_DRAFT'].includes(message.type) && (sender.tab?.id == null || sender.tab.id !== (await read())?.tabId)) throw Error('Message did not come from the batch tab.');
     await dispatch(message);
   });
   serial.then(() => respond({ok: true}), e => respond({ok: false, error: e.message})); return true;

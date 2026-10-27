@@ -1,4 +1,4 @@
-# Image Queue for ChatGPT · Studio 02
+# Image Queue for ChatGPT · Studio 02 (v0.2.1)
 
 A Chrome side panel for importing a batch of image prompts and generating them in sequence. No build step, account API key, or package dependencies.
 
@@ -40,6 +40,12 @@ A miniature coastal village.
 ```
 
 For a file with one prompt per line, select **One prompt per line**. Auto detection cannot reliably infer whether lines or paragraphs are separate prompts; the preview shows exactly what will be submitted. A batch can contain 1–100 prompts. The file import limit is 5 MB.
+
+## Restored ChatGPT drafts
+
+ChatGPT can restore an unsent draft even in a newly opened tab. On the first prompt, the extension saves a local backup of that draft before clearing it and entering the batch prompt. The panel then offers **Download saved chat draft (.txt)**. Download that backup before starting another batch, since the new batch replaces the previous batch state. If backing up fails, the draft is left unchanged and the queue pauses. Placeholder decorations and noneditable image-tool chips are ignored when checking for a draft.
+
+A draft entered between later prompts is left untouched; save or clear it manually before resuming. An unsent draft that exactly matches the current extension prompt can be reused on retry.
 
 ## Controls and downloads
 

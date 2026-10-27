@@ -44,6 +44,7 @@ async function command(type, extra = {}) {
   } catch (e) { updatePrompts(); notify(e.message, true); }
 }
 $('start').onclick = () => { updatePrompts(); if (parsed.length) void command('START', {prompts: parsed, delay: Number($('delay').value)}); };
+$('download-draft').onclick = () => command('DOWNLOAD_DRAFT');
 for (const type of ['pause', 'resume', 'stop', 'download']) $(type).onclick = () => command(type.toUpperCase());
 async function render() {
   const {queue} = await chrome.storage.local.get('queue'); currentQueue = queue; updatePrompts();
@@ -51,6 +52,7 @@ async function render() {
   $('start').hidden = Boolean(active); $('resume').hidden = queue?.status !== 'paused';
   $('pause').disabled = queue?.status !== 'running'; $('stop').hidden = !active;
   $('download').disabled = !queue?.images.length;
+  $('draft-backup').hidden = !queue?.draftBackups?.length;
   if (!queue) return;
   $('queue-state').textContent = queue.status;
   $('completed').textContent = `${queue.index} / ${queue.prompts.length}`;
