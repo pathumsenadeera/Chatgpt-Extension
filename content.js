@@ -16,16 +16,53 @@
   const turns = () => [...document.querySelectorAll('[data-message-author-role="assistant"], article[data-testid^="conversation-turn-"]')];
   const allImages = () => [...document.querySelectorAll('main img, [role="main"] img')];
   const visible = node => Boolean(node.getClientRects().length);
-  async function chooseImageTool() {
-    const findImage = () => [...document.querySelectorAll('button, [role="menuitem"], [role="option"]')].find(node => visible(node) && /^create image$/i.test((node.textContent || node.getAttribute('aria-label') || '').trim()));
+  const toolLabel = node => (node.getAttribute('aria-label') || node.innerText || node.textContent || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+  const imageLabel = text => /^create images?(?:\s|$)/i.test(text.replace(/^[^a-z]+/i, '').trim());
+  function composerScope() {
+    const input = composer();
+    return input?.closest('form, [data-testid="composer"]') || input?.parentElement;
+  }
+  function imageModeSelected() {
+    const input = composer(), scope = composerScope();
+    if (!input || !scope) return false;
+    // Some ChatGPT versions show Create image as the editor placeholder;
+    // others use a noneditable tool chip or an accessible selected control.
+    if ([input.getAttribute('placeholder'), input.getAttribute('data-placeholder')].some(text => text && /^create images?$/i.test(text.trim()))) return true;
+    return [...scope.querySelectorAll('[contenteditable="false"], [data-placeholder], button, [aria-selected], [aria-pressed], [data-testid*="pill"]')].some(node => {
+      if (!visible(node) || node.closest('[role="menu"], [role="listbox"]')) return false;
+      if (/^(?:remove|clear|disable) (?:the )?(?:create image|image generation)/i.test(toolLabel(node))) return true;
+      const label = node.getAttribute('data-placeholder') || toolLabel(node);
+      return imageLabel(label) && (node.getAttribute('contenteditable') === 'false' || /^create images?$/i.test(node.getAttribute('data-placeholder') || '') || node.getAttribute('aria-pressed') === 'true' || node.getAttribute('aria-selected') === 'true' || ['active', 'on', 'checked'].includes(node.getAttribute('data-state')) || /pill/.test(node.getAttribute('data-testid') || ''));
+    });
+  }
+  async function chooseImageTool(token) {
+    if (imageModeSelected()) return;
+    const findImage = () => [...document.querySelectorAll('button, [role="menuitem"], [role="menuitemradio"], [role="option"]')].find(node => visible(node) && imageLabel(toolLabel(node)));
+    const waitFor = async (check, milliseconds) => {
+      const deadline = Date.now() + milliseconds;
+      do {
+        if (active !== token) return null;
+        const result = check(); if (result) return result;
+        await sleep(100);
+      } while (Date.now() < deadline);
+      return null;
+    };
     let image = findImage();
-    if (image) { image.click(); return; }
-    const tools = [...document.querySelectorAll('button')].find(node => visible(node) && /^(tools|view all tools)$/i.test((node.getAttribute('aria-label') || node.textContent || '').trim()));
-    if (!tools) return;
-    tools.click(); await sleep(400);
-    image = findImage();
-    if (image) image.click();
-    else document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+    if (!image) {
+      const scope = composerScope();
+      const openers = [...(scope?.querySelectorAll('button') || [])].filter(node => visible(node) && (node.matches('[data-testid="composer-plus-btn"]') || /^(?:tools|view all tools|open tools menu|add files and more|add photos and files|upload files and more|add attachments|attach files)$/i.test(toolLabel(node))));
+      for (const opener of openers) {
+        if (active !== token) return;
+        opener.click();
+        image = await waitFor(findImage, 1800);
+        if (image) break;
+        document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+      }
+    }
+    if (active !== token) return;
+    if (!image) throw Error('Create image option not found. Select Create image from the + / Tools menu in the batch chat, then Resume.');
+    image.click();
+    if (!await waitFor(imageModeSelected, 4000) && active === token) throw Error('Create image was clicked, but its selected mode could not be confirmed. Select Create image in the chat input, then Resume.');
   }
   function images(nodes) {
     return nodes.flatMap(node => [...node.querySelectorAll('img')]).filter(img => img.complete && img.naturalWidth >= 256 && img.naturalHeight >= 256).map(img => img.currentSrc || img.src).filter(url => /^(https:|blob:|data:image\/)/.test(url));
@@ -45,7 +82,11 @@
       Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, text);
     } else {
       const selection = getSelection(); const range = document.createRange();
-      range.selectNodeContents(input); selection.removeAllRanges(); selection.addRange(range);
+      range.selectNodeContents(input);
+      // Keep the selected tool chip intact when replacing editor text.
+      const chips = [...input.querySelectorAll('[contenteditable="false"]')];
+      if (chips.length) range.setStartAfter(chips[chips.length - 1]);
+      selection.removeAllRanges(); selection.addRange(range);
       const changed = text ? document.execCommand('insertText', false, text) : document.execCommand('delete', false);
       if (!changed && draftText(input).trim()) throw Error('Unable to update the ChatGPT editor.');
     }
@@ -76,7 +117,7 @@
       const beforeImages = new Set(images(turns()));
       const existingImages = new Set(allImages().map(img => img.currentSrc || img.src));
       const beforeCount = turns().length;
-      await chooseImageTool();
+      await chooseImageTool(token);
       if (active !== token) return;
       input = await waitForComposer(token);
       if (!input || active !== token) return;
@@ -92,6 +133,7 @@
         await sleep(200);
       }
       if (!send || send.disabled) throw Error('Send button unavailable. Check ChatGPT and your image-generation access.');
+      if (!imageModeSelected()) throw Error('Create image mode was lost while entering the prompt. Select Create image in the chat input, then Resume.');
       send.click(); submitted = true;
       let last = '', stableSince = Date.now();
       const deadline = Date.now() + 12 * 60 * 1000;

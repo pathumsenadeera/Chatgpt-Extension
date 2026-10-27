@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Image Queue for ChatGPT",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Import image prompts, start a fresh ChatGPT chat, and generate your batch one image at a time.",
   "permissions": [
     "storage",

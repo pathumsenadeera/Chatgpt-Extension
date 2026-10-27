@@ -53,7 +53,20 @@ with sync_playwright() as p:
     assert page.evaluate('window.submitted.length') == 0
     page.evaluate('''
       const main=document.querySelector('main');
-      main.innerHTML='<form><div contenteditable="true" role="textbox"></div><button type="submit" aria-label="Send message">Send</button></form>';
+      main.innerHTML='<form><button type="button" data-testid="composer-plus-btn" aria-label="Add files and more">+</button><div contenteditable="true" role="textbox"></div><button type="submit" aria-label="Send message">Send</button></form>';
+      window.toolSelections=0;
+      main.querySelector('[data-testid="composer-plus-btn"]').onclick=()=>setTimeout(()=>{
+        const menu=document.createElement('div');menu.setAttribute('role','menu');
+        menu.innerHTML='<button role="menuitem">Create image<span>Visualize anything</span></button>';
+        // Menu description is on a new line in the live UI.
+        menu.querySelector('button').setAttribute('aria-label','Create image');
+        menu.querySelector('button').onclick=()=>{
+          window.toolSelections++;
+          const chip=document.createElement('span');chip.contentEditable='false';chip.textContent='Create image';
+          main.querySelector('[contenteditable="true"]').prepend(chip);menu.remove();
+        };
+        document.body.append(menu);
+      },300);
       main.querySelector('form').onsubmit=e=>{
         e.preventDefault();window.submitted.push(main.querySelector('[contenteditable]').innerText);
         main.querySelector('[contenteditable]').textContent='';
@@ -67,6 +80,7 @@ with sync_playwright() as p:
     page.clock.run_for(2000)
     page.wait_for_function('window.submitted.length === 1')
     assert 'A mountain garden' in page.evaluate('window.submitted[0]')
+    assert page.evaluate('window.toolSelections') == 1
     page.wait_for_function('document.querySelector("img").naturalWidth === 512')
     page.clock.run_for(20000)
     assert page.evaluate("window.results.filter(m=>m.type==='RESULT').length") == 0
@@ -81,6 +95,7 @@ with sync_playwright() as p:
     page.evaluate('''window.receive({type:'GENERATE',id:'fixture',index:1,prompt:'A seaside village'}, {}, ()=>{});''')
     page.clock.run_for(1000)
     assert page.evaluate('window.submitted.length') == 2
+    assert page.evaluate('window.toolSelections') == 2
     page.wait_for_function('document.querySelectorAll("img")[1].naturalWidth === 512')
     # Change the new source to distinguish this image from the previous one.
     page.evaluate('''document.querySelectorAll('img')[1].src='data:image/svg+xml;base64,'+btoa('<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512"><rect width="512" height="512" fill="blue"/></svg>');document.querySelector('[data-testid=stop-button]').remove();''')
@@ -105,7 +120,7 @@ with sync_playwright() as p:
         page.route('https://chatgpt.com/**', lambda r: r.fulfill(body='<html><body><main></main></body></html>', content_type='text/html'))
         page.goto('https://chatgpt.com/')
         page.evaluate('''({markup,draft,backupOK}) => {
-          document.querySelector('main').innerHTML='<form>'+markup+'<button type="submit">Send</button></form>';
+          document.querySelector('main').innerHTML='<form>'+markup+'<button type="button" aria-pressed="true">Create image</button><button type="submit">Send</button></form>';
           const input=document.querySelector('textarea,[contenteditable="true"]');
           if (draft) {if (input.tagName === 'TEXTAREA') input.value=draft;else input.textContent=draft;}
           window.results=[];window.sent=[];
@@ -127,5 +142,36 @@ with sync_playwright() as p:
             assert page.evaluate('window.sent.length') == 0, name
             assert page.locator('textarea').input_value() == draft, name
         print('PASS: '+name)
+        page.close()
+    # Strict image-mode failures must never fall back to sending a plain prompt.
+    for scenario in ['unavailable', 'unconfirmed', 'lost-on-input', 'already-selected']:
+        page = browser.new_page()
+        page.route('https://chatgpt.com/**', lambda r: r.fulfill(body='<html><body><main></main></body></html>', content_type='text/html'))
+        page.goto('https://chatgpt.com/')
+        page.clock.install()
+        page.evaluate('''scenario => {
+          document.querySelector('main').innerHTML='<form><textarea placeholder="Message"></textarea><button type="submit">Send</button></form>';
+          window.results=[];window.sent=0;window.toolClicks=0;
+          window.chrome={runtime:{onMessage:{addListener:fn=>window.receive=fn},sendMessage:async m=>{window.results.push(m);return {ok:true}}}};
+          const form=document.querySelector('form');
+          form.onsubmit=e=>{e.preventDefault();window.sent++;};
+          if (scenario !== 'unavailable') {
+            const tool=document.createElement('button');tool.type='button';tool.textContent='Create image';form.prepend(tool);
+            if (scenario === 'already-selected') tool.setAttribute('aria-pressed','true');
+            tool.onclick=()=>{window.toolClicks++;if (scenario !== 'unconfirmed') tool.setAttribute('aria-pressed','true');};
+            if (scenario === 'lost-on-input') form.querySelector('textarea').oninput=()=>tool.setAttribute('aria-pressed','false');
+          }
+        }''',scenario)
+        page.add_script_tag(path=str(ROOT / 'content.js'))
+        page.evaluate("window.receive({type:'GENERATE',id:'mode-test',index:0,prompt:'A moon garden'}, {}, ()=>{})")
+        page.clock.run_for(6000)
+        if scenario == 'already-selected':
+            assert page.evaluate('window.sent') == 1
+            assert page.evaluate('window.toolClicks') == 0
+        else:
+            page.wait_for_function("window.results.some(m=>m.type==='RESULT' && m.error)")
+            assert page.evaluate('window.sent') == 0
+            assert 'Create image' in page.evaluate("window.results.find(m=>m.type==='RESULT').error")
+        print('PASS: image mode '+scenario)
         page.close()
     browser.close()

@@ -1,4 +1,4 @@
-# Image Queue for ChatGPT · Studio 02 (v0.2.1)
+# Image Queue for ChatGPT · Studio 02 (v0.2.2)
 
 A Chrome side panel for importing a batch of image prompts and generating them in sequence. No build step, account API key, or package dependencies.
 
@@ -16,7 +16,7 @@ Try [examples/image-prompts.txt](examples/image-prompts.txt) to check a three-pr
 6. Check **prompts detected** and **Preview detected prompts**. Choose a separator mode if needed.
 7. Click **Start in a new chat**. The extension opens a fresh ChatGPT tab, waits for the input to load, then submits prompts in order in that same conversation. Keep the tab open; avoid sending manual messages in it.
 
-The extension selects **Create image** when the English control is available directly or in **Tools**, and also requests the image tool explicitly in each prompt. It waits for a new, loaded image, no visible streaming/generation indicator, and 12 seconds of stable image sources before recording completion and advancing.
+Before **every** prompt, the extension checks for an active **Create image** mode. If needed, it selects the English **Create image** control directly or through the composer’s **+ / Tools** menu and waits for a selected tool chip, placeholder, or accessible selected state. It checks the mode again after entering the prompt and preserves tool chips inside the editor. If the option is missing, selection cannot be confirmed, or the mode disappears while typing, it pauses without sending. Select **Create image** manually in the batch chat and press **Resume**. An already selected mode is kept active rather than toggled off. Each prompt also explicitly requests the image tool. It waits for a new, loaded image, no visible streaming/generation indicator, and 12 seconds of stable image sources before recording completion and advancing.
 
 ## Text file formats
 
