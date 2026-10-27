@@ -1,11 +1,36 @@
 {
   "manifest_version": 3,
   "name": "Image Queue for ChatGPT",
-  "version": "0.1.0",
-  "description": "Run a queue of image prompts in your active ChatGPT conversation and save the results.",
-  "permissions": ["storage", "unlimitedStorage", "downloads", "alarms"],
-  "host_permissions": ["https://chatgpt.com/*"],
-  "action": {"default_popup": "popup.html"},
-  "background": {"service_worker": "background.js"},
-  "content_scripts": [{"matches": ["https://chatgpt.com/*"], "js": ["content.js"]}]
+  "version": "0.2.0",
+  "description": "Import image prompts, start a fresh ChatGPT chat, and generate your batch one image at a time.",
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "downloads",
+    "alarms",
+    "sidePanel"
+  ],
+  "host_permissions": [
+    "https://chatgpt.com/*"
+  ],
+  "action": {
+    "default_title": "Open Image Queue"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*"
+      ],
+      "js": [
+        "content.js"
+      ]
+    }
+  ],
+  "side_panel": {
+    "default_path": "popup.html"
+  },
+  "minimum_chrome_version": "116"
 }

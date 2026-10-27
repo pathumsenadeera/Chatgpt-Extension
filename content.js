@@ -1,9 +1,20 @@
 (() => {
   let active = null;
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-  const composer = () => document.querySelector('#prompt-textarea');
-  const busy = () => document.querySelector('[data-testid="stop-button"], button[aria-label="Stop streaming"], button[aria-label="Stop generating"]');
-  const turns = () => [...document.querySelectorAll('[data-message-author-role="assistant"]')];
+  const instanceId = crypto.randomUUID();
+  const composer = () => [...document.querySelectorAll('#prompt-textarea, textarea[placeholder], [contenteditable="true"][role="textbox"], [contenteditable="true"].ProseMirror, [contenteditable="true"][data-lexical-editor], form [contenteditable="true"], main textarea, main [contenteditable="true"]')].find(node => visible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true');
+  async function waitForComposer(token) {
+    const deadline = Date.now() + 60000;
+    while (Date.now() < deadline) {
+      if (active !== token) return null;
+      const input = composer(); if (input) return input;
+      await sleep(400);
+    }
+    throw Error('Chat input not found after waiting 60 seconds. Sign in to ChatGPT, open a normal chat, then Resume.');
+  }
+  const busy = () => [...document.querySelectorAll('[data-testid="stop-button"], button[aria-label*="Stop streaming"], button[aria-label*="Stop generating"], [data-testid*="image"][aria-busy="true"], [data-is-streaming="true"]')].some(visible);
+  const turns = () => [...document.querySelectorAll('[data-message-author-role="assistant"], article[data-testid^="conversation-turn-"]')];
+  const allImages = () => [...document.querySelectorAll('main img, [role="main"] img')];
   const visible = node => Boolean(node.getClientRects().length);
   async function chooseImageTool() {
     const findImage = () => [...document.querySelectorAll('button, [role="menuitem"], [role="option"]')].find(node => visible(node) && /^create image$/i.test((node.textContent || node.getAttribute('aria-label') || '').trim()));
@@ -22,13 +33,17 @@
   async function generate(message, token) {
     let submitted = false;
     try {
-      const input = composer();
-      if (!input) throw Error('ChatGPT composer not found. Sign in and open a conversation.');
+      let input = await waitForComposer(token);
+      if (!input || active !== token) return;
       if (busy()) throw Error('Wait for the current ChatGPT response to finish before starting.');
       if ((input.value || input.textContent || '').trim()) throw Error('Clear your existing draft in ChatGPT before starting.');
-      const before = new Set(turns());
+      const beforeImages = new Set(images(turns()));
+      const existingImages = new Set(allImages().map(img => img.currentSrc || img.src));
+      const beforeCount = turns().length;
       await chooseImageTool();
       if (active !== token) return;
+      input = await waitForComposer(token);
+      if (!input || active !== token) return;
       // Explicit image instructions also work when ChatGPT does not expose an image tool menu.
       const prompt = `Create an image using the image generation tool. Generate the image rather than replying with instructions.\n\n${message.prompt}`;
       input.focus();
@@ -42,7 +57,7 @@
       let send;
       for (let n = 0; n < 30; n++) {
         if (active !== token) return;
-        send = document.querySelector('[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label="Send message"]');
+        send = [...document.querySelectorAll('[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label="Send message"], button[aria-label="Send"], form button[type="submit"]')].find(visible);
         if (send && !send.disabled) break;
         await sleep(200);
       }
@@ -53,19 +68,29 @@
       while (Date.now() < deadline) {
         await sleep(1500);
         if (active !== token) return;
-        const fresh = turns().filter(node => !before.has(node));
-        const urls = [...new Set(images(fresh))];
+        // Compare sources, not DOM identity: ChatGPT may re-render previous turns.
+        const fresh = turns().slice(beforeCount);
+        const inTurns = images(turns()).filter(url => !beforeImages.has(url));
+        const generatedOutsideTurns = allImages().filter(img => img.closest('[data-testid*="image"], [data-testid*="conversation-turn"], [data-message-author-role="assistant"]') && !existingImages.has(img.currentSrc || img.src));
+        const urls = [...new Set([...inTurns, ...images([{querySelectorAll: () => generatedOutsideTurns}])])];
         const signature = JSON.stringify(urls);
         if (signature !== last || busy()) { last = signature; stableSince = Date.now(); }
         if (urls.length && !busy() && Date.now() - stableSince > 12000) {
           // Copy bytes now: ChatGPT image URLs may expire before a later bulk download.
           const data = [];
           for (const url of urls) {
-            const response = await fetch(url, {credentials: 'include'});
-            if (!response.ok) throw Error(`Image fetch failed (${response.status}).`);
-            const blob = await response.blob();
-            if (!blob.type.startsWith('image/')) throw Error('Image response was not an image.');
-            data.push(await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = reject; reader.readAsDataURL(blob); }));
+            try {
+              const response = await fetch(url, {credentials: 'include'});
+              if (!response.ok) throw Error(`Image fetch failed (${response.status}).`);
+              const blob = await response.blob();
+              if (!blob.type.startsWith('image/')) throw Error('Image response was not an image.');
+              data.push(await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = reject; reader.readAsDataURL(blob); }));
+            } catch (error) {
+              // Chrome's download manager can fetch signed HTTPS assets even when
+              // page fetch is blocked by the image CDN's cross-origin policy.
+              if (!url.startsWith('https://')) throw error;
+              data.push(url);
+            }
           }
           if (active !== token) return;
           await chrome.runtime.sendMessage({type: 'RESULT', id: message.id, index: message.index, urls: data});
@@ -87,4 +112,5 @@
       reply({ok: true}); void generate(message, token);
     }
   });
+  chrome.runtime.sendMessage({type: 'READY', instanceId}).catch(() => {});
 })();

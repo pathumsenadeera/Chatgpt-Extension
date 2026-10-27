@@ -1,24 +1,69 @@
-# Image Queue for ChatGPT
+# Image Queue for ChatGPT · Studio 02
 
-A dependency-free Chrome Manifest V3 extension. Paste multiple image prompts separated by a line containing `---`. The extension sends one prompt at a time to your active ChatGPT conversation, waits for a finished image, and saves it before moving on.
+A Chrome side panel for importing a batch of image prompts and generating them in sequence. No build step, account API key, or package dependencies.
 
-## Install
+![Studio side panel](docs/studio-preview.png)
 
-1. Download or clone this repository to your computer.
-2. Open `chrome://extensions`, enable **Developer mode**, select **Load unpacked**, and choose this folder.
-3. Open or refresh `https://chatgpt.com`, sign in, and open a conversation with image generation available. Clear any existing composer draft.
-4. Click the extension, enter prompts, and choose **Start queue**. Keep the ChatGPT tab open and avoid sending messages manually during the run.
+Try [examples/image-prompts.txt](examples/image-prompts.txt) to check a three-prompt import.
 
-Images download automatically into `Downloads/ChatGPT-Image-Queue/<batch-id>/`. Chrome controls the download directory; extensions cannot write to arbitrary folders. Downloads happen as images finish so progress is retained if a later prompt fails. The button to download finished images again replays the saved downloads.
+## Install or update
 
-**Pause** finishes the current prompt and prevents the next one. **Resume** continues or retries a failed prompt. **Stop** cancels queue monitoring; a request already submitted to ChatGPT may continue there. Check the conversation before retrying a timed-out prompt. Reloading the ChatGPT tab during generation interrupts monitoring; stop and start a new queue if necessary.
+1. Download **Code → Download ZIP** from this repository and extract it.
+2. Open `chrome://extensions` and enable **Developer mode**.
+3. For a new install, select **Load unpacked** and choose the folder containing `manifest.json`. For an update, replace the files in your existing extension folder and click **Reload** on its Chrome extension card. Chrome may ask you to accept the new side-panel permission.
+4. Use Chrome 116 or newer. Sign in to `https://chatgpt.com` using your regular browser profile.
+5. Click the extension icon to open its side panel. Import a `.txt` file or paste prompts.
+6. Check **prompts detected** and **Preview detected prompts**. Choose a separator mode if needed.
+7. Click **Start in a new chat**. The extension opens a fresh ChatGPT tab, waits for the input to load, then submits prompts in order in that same conversation. Keep the tab open; avoid sending manual messages in it.
+
+The extension selects **Create image** when the English control is available directly or in **Tools**, and also requests the image tool explicitly in each prompt. It waits for a new, loaded image, no visible streaming/generation indicator, and 12 seconds of stable image sources before recording completion and advancing.
+
+## Text file formats
+
+**Auto detect** prefers explicit separators, then multiple numbered headings, then blank lines. Windows line endings and a UTF-8 BOM are supported. For multiline prompts with internal blank paragraphs, use numbered headings or explicit separators:
+
+```text
+01. CHRISTMAS BELL
+Design a vintage golden Christmas bell ornament.
+
+Keep the background white and square.
+
+02. SNOWMAN
+A cheerful watercolor snowman.
+```
+
+```text
+A moon garden.
+Add soft blue lighting.
+---
+A miniature coastal village.
+```
+
+For a file with one prompt per line, select **One prompt per line**. Auto detection cannot reliably infer whether lines or paragraphs are separate prompts; the preview shows exactly what will be submitted. A batch can contain 1–100 prompts. The file import limit is 5 MB.
+
+## Controls and downloads
+
+- **Pause** finishes monitoring the current image and prevents the next prompt.
+- **Resume** continues the queue. On a generation error, it retries the current prompt: check the conversation first to avoid duplicates.
+- **Stop** cancels extension monitoring. An already submitted ChatGPT request may continue on the website.
+- Closing the panel does not stop the queue. Reloading the chat while monitoring an image pauses it with an explanation. Closing the chat stops the queue.
+
+Images download as they finish to `Downloads/ChatGPT-Image-Queue/<batch-id>/`. Chrome controls the download directory; allow multiple downloads if asked. **Download collected images again** retries saved downloads. The extension retains image bytes when accessible. If the image CDN blocks page fetching, it passes the HTTPS asset URL to Chrome’s download manager; those signed URLs may expire, so later re-downloads may fail. Download acceptance is not proof the file finished saving: Chrome’s download history shows its final status.
 
 ## Limits and privacy
 
-This uses ChatGPT's website UI, which can change. It selects **Create image** when that English-language control is exposed directly or in a **Tools** menu, and also explicitly requests the image-generation tool in the prompt. It detects newly returned assistant images and waits for streaming to stop and the image to stabilize. Live generation and download access must be checked with your own signed-in account. Your account's usage limits, safety checks, and applicable service terms still apply; the extension pauses on missing images instead of trying to bypass restrictions.
+ChatGPT's website UI changes over time. Actual generation requires a signed-in account with image-generation access. Rate limits, refusals, account restrictions, and service terms still apply. Missing images or editor errors pause the queue; no limit bypass is attempted. No external server is used. Drafts, batch state, and collected images or asset URLs are stored locally in Chrome extension storage. A new batch replaces the previous batch history but leaves downloaded files intact. Remove the extension to clear its local data. Large image batches consume memory and disk.
 
-Prompts and generated image bytes are stored locally in Chrome extension storage, without a separate server or API key. Remove the extension to clear its stored data. A new batch replaces the extension's previous batch history, but downloaded files remain. The extension requests unlimited local storage for image bytes; large batches still consume memory and disk, so start with a small batch. Image assets displayed by ChatGPT must be fetchable by the page; inaccessible assets pause the queue.
+## Development and verification
 
-## Development
+```sh
+node --test tests/*.test.cjs
+```
 
-Requires Node.js 18+ for tests; the extension has no package dependencies or build step. Run `node --test tests/*.test.cjs`. Reload the extension in Chrome after edits, then refresh ChatGPT. Actual ChatGPT integration needs a signed-in Chrome session and image-generation access.
+Node.js 18+ is required for tests. Optional browser fixture checks require Python Playwright and `/usr/bin/chromium`:
+
+```sh
+python3 tests/browser_check.py
+```
+
+These checks exercise TXT upload/parsing, queue sequencing, a delayed editor without `#prompt-textarea`, actual editor insertion and send events, completion monitoring, and avoiding previous-image duplication. They use a mocked ChatGPT page and do not establish live compatibility with every ChatGPT layout or signed-in account.

@@ -1,45 +1,61 @@
 let serial = Promise.resolve();
 const read = async () => (await chrome.storage.local.get('queue')).queue;
 const save = queue => chrome.storage.local.set({queue});
+chrome.sidePanel.setPanelBehavior({openPanelOnActionClick: true}).catch(console.error);
 async function download(images) {
   for (const image of images) await chrome.downloads.download({url: image.url, filename: image.filename, conflictAction: 'uniquify', saveAs: false});
+}
+async function pauseWithError(queue, error) {
+  queue.pending = false; queue.status = 'paused'; queue.error = error;
+  await save(queue);
 }
 async function dispatch(message) {
   let queue = await read();
   if (message.type === 'START') {
     if (queue && ['running', 'paused'].includes(queue.status)) throw Error('Stop the existing queue first.');
-    if (!Array.isArray(message.prompts) || !message.prompts.length || message.prompts.length > 100) throw Error('Enter between 1 and 100 prompts.');
-    const [tab] = await chrome.tabs.query({active: true, currentWindow: true});
-    if (!tab?.url?.startsWith('https://chatgpt.com/')) throw Error('Open a ChatGPT conversation first.');
-    const ready = await chrome.tabs.sendMessage(tab.id, {type: 'CHECK'});
-    if (!ready?.ready) throw Error('Sign in and open a ChatGPT conversation with a visible composer.');
-    queue = {id: crypto.randomUUID(), tabId: tab.id, prompts: message.prompts, index: 0, images: [], status: 'running', delay: Math.max(5, Math.min(300, message.delay || 10)), error: '', pending: false};
-    await chrome.storage.local.set({delay: queue.delay});
-    await save(queue);
-    await step(queue);
+    if (!Array.isArray(message.prompts) || !message.prompts.length || message.prompts.length > 100 || message.prompts.some(p => typeof p !== 'string' || !p.trim())) throw Error('Enter between 1 and 100 nonempty prompts.');
+    // A fresh tab is intentional: never overwrite an existing conversation or draft.
+    const tab = await chrome.tabs.create({url: 'https://chatgpt.com/', active: true});
+    queue = {id: crypto.randomUUID(), tabId: tab.id, prompts: message.prompts, index: 0, images: [], status: 'running', phase: 'opening', delay: Math.max(5, Math.min(300, Number(message.delay) || 10)), error: '', pending: false, openingDeadline: Date.now() + 90000};
+    await chrome.storage.local.set({delay: queue.delay}); await save(queue);
+    await chrome.alarms.create('next', {when: Date.now() + 1000});
+    await chrome.alarms.create('watchdog', {periodInMinutes: 1});
+  } else if (message.type === 'READY') {
+    if (!queue || queue.status === 'stopped' || queue.status === 'completed') return;
+    if (queue.pending && queue.instanceId !== message.instanceId) {
+      await pauseWithError(queue, 'ChatGPT was reloaded during generation. Check the last image before resuming; Resume retries the current prompt.');
+    } else if (!queue.pending && queue.phase === 'opening') await step(queue);
   } else if (message.type === 'RESULT') {
     if (!queue || queue.id !== message.id || !queue.pending || queue.index !== message.index || queue.status === 'stopped') return;
     queue.pending = false;
     if (message.error) { queue.status = 'paused'; queue.error = message.error; }
-    else {
-      const images = message.urls.map((url, i) => ({url, filename: `ChatGPT-Image-Queue/${queue.id}/${String(queue.index + 1).padStart(3, '0')}-${i + 1}.png`}));
-      queue.images.push(...images);
-      queue.index++;
-      try { await download(images); } catch (e) { queue.status = 'paused'; queue.error = 'Download failed: ' + e.message + '. Use Download finished images again.'; }
+    else if (!Array.isArray(message.urls) || !message.urls.length || message.urls.some(url => typeof url !== 'string' || !/^(?:data:image\/[\w.+-]+;base64,|https:\/\/)/.test(url))) {
+      queue.status = 'paused'; queue.error = 'No downloadable image received. Check the ChatGPT response before retrying.';
+    } else {
+      const images = message.urls.map((url, i) => {
+        const mime = url.startsWith('data:') ? url.split(';')[0].slice(5) : '';
+        const ext = {'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif'}[mime] || 'png';
+        return {url, filename: `ChatGPT-Image-Queue/${queue.id}/${String(queue.index + 1).padStart(3, '0')}-${i + 1}.${ext}`};
+      });
+      queue.images.push(...images); queue.index++; queue.phase = 'waiting';
+      try { await download(images); }
+      catch (e) { queue.status = 'paused'; queue.error = 'Download failed: ' + e.message + '. Use Download collected images again.'; }
       if (queue.index === queue.prompts.length && queue.status === 'running') queue.status = 'completed';
     }
     await save(queue);
     if (queue.status === 'running') await chrome.alarms.create('next', {when: Date.now() + queue.delay * 1000});
   } else if (message.type === 'DOWNLOAD') { if (queue) await download(queue.images); }
   else if (queue) {
-    if (message.type === 'PAUSE') queue.status = 'paused';
+    if (message.type === 'PAUSE' && queue.status === 'running') queue.status = 'paused';
     if (message.type === 'STOP') {
       queue.status = 'stopped'; queue.pending = false;
       await chrome.tabs.sendMessage(queue.tabId, {type: 'CANCEL'}).catch(() => {});
+      await chrome.alarms.clear('next'); await chrome.alarms.clear('watchdog');
     }
     if (message.type === 'RESUME') {
       if (queue.status !== 'paused') throw Error('Queue is not paused.');
       queue.status = queue.index === queue.prompts.length ? 'completed' : 'running'; queue.error = '';
+      queue.openingDeadline = Date.now() + 90000;
     }
     await save(queue);
     if (message.type === 'RESUME') await step(queue);
@@ -47,25 +63,42 @@ async function dispatch(message) {
 }
 async function step(queue) {
   if (queue.status !== 'running' || queue.pending || queue.index >= queue.prompts.length) return;
-  queue.pending = true; await save(queue);
+  let ready;
+  try { ready = await chrome.tabs.sendMessage(queue.tabId, {type: 'CHECK'}); }
+  catch {
+    if (queue.phase === 'opening' && Date.now() < queue.openingDeadline) {
+      await chrome.alarms.create('next', {when: Date.now() + 2000}); return;
+    }
+    await pauseWithError(queue, 'Cannot reach the ChatGPT tab. Keep the new tab open, sign in, and Resume.'); return;
+  }
+  queue.instanceId = ready.instanceId; queue.pending = true; queue.phase = 'generating'; queue.startedAt = Date.now(); await save(queue);
   try {
     const result = await chrome.tabs.sendMessage(queue.tabId, {type: 'GENERATE', id: queue.id, index: queue.index, prompt: queue.prompts[queue.index]});
-    if (!result?.ok) throw Error('Generation monitor already active.');
-  }
-  catch { queue.pending = false; queue.status = 'paused'; queue.error = 'ChatGPT tab unavailable. Reopen the conversation and start a new queue.'; await save(queue); }
+    if (!result?.ok) throw Error('A previous generation is still being monitored. Wait for it to finish.');
+  } catch (e) { await pauseWithError(queue, e.message || 'ChatGPT tab unavailable.'); }
 }
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
-  if (message.type === 'RESULT' && sender.tab?.id == null) return;
   serial = serial.catch(() => {}).then(async () => {
-    if (message.type === 'RESULT' && sender.tab.id !== (await read())?.tabId) return;
+    if (['RESULT', 'READY'].includes(message.type) && (sender.tab?.id == null || sender.tab.id !== (await read())?.tabId)) return;
     await dispatch(message);
   });
-  serial.then(() => respond({ok: true}), e => respond({ok: false, error: e.message}));
-  return true;
+  serial.then(() => respond({ok: true}), e => respond({ok: false, error: e.message})); return true;
 });
 chrome.alarms.onAlarm.addListener(alarm => {
-  if (alarm.name === 'next') serial = serial.catch(() => {}).then(async () => { const q = await read(); if (q) await step(q); });
+  serial = serial.catch(() => {}).then(async () => {
+    const queue = await read(); if (!queue) return;
+    if (alarm.name === 'next') await step(queue);
+    if (alarm.name === 'watchdog' && queue.pending && Date.now() - queue.startedAt > 15 * 60 * 1000) {
+      await chrome.tabs.sendMessage(queue.tabId, {type: 'CANCEL'}).catch(() => {});
+      await pauseWithError(queue, 'Image monitoring timed out. Check ChatGPT before resuming to avoid duplicate prompts.');
+    }
+  });
 });
 chrome.tabs.onRemoved.addListener(tabId => {
-  serial = serial.catch(() => {}).then(async () => { const q = await read(); if (q?.tabId === tabId && ['running', 'paused'].includes(q.status)) { q.status = 'stopped'; q.pending = false; q.error = 'ChatGPT tab closed.'; await save(q); } });
+  serial = serial.catch(() => {}).then(async () => {
+    const queue = await read();
+    if (queue?.tabId === tabId && ['running', 'paused'].includes(queue.status)) {
+      queue.status = 'stopped'; queue.pending = false; queue.error = 'ChatGPT tab closed.'; await save(queue);
+    }
+  });
 });
